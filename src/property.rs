@@ -11,19 +11,23 @@
 
 use std::collections::HashMap;
 
-use common::time::Ts;
+use common::time::{Semantic, Ts};
 use ese::{Database, Value};
 
 use crate::Layout;
 
-// `VARTYPE`s of the properties whose binary values this crate reads.
+// `VARTYPE`s of the properties whose values this crate reads.
+pub(crate) const VT_BOOL: u32 = 11;
 const VT_I8: u32 = 20;
 const VT_UI8: u32 = 21;
-const VT_LPWSTR: u32 = 31;
+pub(crate) const VT_LPWSTR: u32 = 31;
 const VT_FILETIME: u32 = 64;
+pub(crate) const VT_BLOB: u32 = 65;
 const VT_CLSID: u32 = 72;
 /// `VT_VECTOR`: a list of values of the type in the low bits.
-const VT_VECTOR: u32 = 0x1000;
+pub(crate) const VT_VECTOR: u32 = 0x1000;
+/// Not a `VARTYPE`: this crate's mark for a FILETIME of local time.
+const LOCAL_FILETIME: u32 = 0x1_0000 | VT_FILETIME;
 
 /// Properties stored as binary FILETIMEs, for databases that don't list
 /// their properties' types (`SystemIndex_PropertyStore`): those Windows 7's
@@ -61,6 +65,13 @@ const FILETIMES: [&str; 31] = [
     "System_Search_GatherTime",
     "System_Software_DateLastUsed",
     "System_StartDate",
+];
+
+/// Properties stored as binary FILETIMEs of the computer's local time,
+/// its zone not recorded.
+const LOCAL_FILETIMES: [&str; 2] = [
+    "System_ActivityHistory_LocalEndTime",
+    "System_ActivityHistory_LocalStartTime",
 ];
 
 /// Properties stored as binary 64-bit unsigned integers, likewise.
@@ -189,6 +200,17 @@ impl Types {
         Self(types)
     }
 
+    /// The types this crate knows, and `listed` for the others (a
+    /// database's own list may be wrong for the times this crate knows:
+    /// Windows 11 types `System.ActivityHistory.StartTime` `VT_UI8`).
+    pub(crate) fn with(listed: impl IntoIterator<Item = (String, u32)>) -> Self {
+        let mut types = known_types();
+        for (name, vt) in listed {
+            types.entry(name).or_insert(vt);
+        }
+        Self(types)
+    }
+
     fn of(&self, property: &str) -> Option<u32> {
         self.0.get(property).copied()
     }
@@ -197,8 +219,10 @@ impl Types {
 /// The types this crate knows without a list.
 fn known_types() -> HashMap<String, u32> {
     let times = FILETIMES.iter().map(|&name| (name, VT_FILETIME));
+    let local = LOCAL_FILETIMES.iter().map(|&name| (name, LOCAL_FILETIME));
     let unsigned = UNSIGNED.iter().map(|&name| (name, VT_UI8));
     times
+        .chain(local)
         .chain(unsigned)
         .chain(TEXTS)
         .map(|(name, vt)| (name.to_owned(), vt))
@@ -262,6 +286,9 @@ impl Decoder {
             VT_FILETIME => self
                 .u64(bytes)
                 .map(|ticks| Property::Time(Ts::from_filetime(ticks))),
+            LOCAL_FILETIME => self
+                .u64(bytes)
+                .map(|ticks| Property::Time(local(Ts::from_filetime(ticks)))),
             VT_UI8 => self.u64(bytes).map(Property::Unsigned),
             VT_I8 => self.u64(bytes).map(|value| Property::Integer(value as i64)),
             VT_CLSID => bytes.try_into().ok().map(Property::Guid),
@@ -283,7 +310,7 @@ impl Decoder {
         let bytes: [u8; 8] = bytes.try_into().ok()?;
         Some(match self.layout {
             Layout::Legacy => u64::from_be_bytes(bytes),
-            Layout::PropertyStore => u64::from_le_bytes(bytes),
+            Layout::PropertyStore | Layout::Sqlite => u64::from_le_bytes(bytes),
         })
     }
 
@@ -291,7 +318,7 @@ impl Decoder {
     fn text(&self, bytes: &[u8]) -> (Property, Option<String>) {
         let decoded = match self.layout {
             Layout::Legacy => crate::encoded::decode(bytes),
-            Layout::PropertyStore => Ok(utf16(bytes)),
+            Layout::PropertyStore | Layout::Sqlite => Ok(utf16(bytes)),
         };
         match decoded {
             Ok(text) => (Property::Text(text), None),
@@ -299,7 +326,8 @@ impl Decoder {
         }
     }
 
-    /// A binary list of strings: in `SystemIndex_PropertyStore` UTF-16,
+    /// A binary list of strings: in `SystemIndex_PropertyStore` and
+    /// `Windows.db` UTF-16,
     /// the strings separated by NULs; in `SystemIndex_0A` (where no such
     /// value has been seen, lists being multi-valued text columns) taken as
     /// one compressed text.
@@ -313,6 +341,15 @@ impl Decoder {
             .map(|text| Property::Text(text.to_owned()))
             .collect();
         (Property::List(items), None)
+    }
+}
+
+/// A UTC time read as the local time it is, its zone unknown; `NotSet`
+/// and the like unchanged.
+fn local(time: Ts) -> Ts {
+    match (time.semantic(), time.ticks()) {
+        (Semantic::Utc, Some(ticks)) => Ts::from_local_ticks(ticks, time.precision()),
+        _ => time,
     }
 }
 
@@ -375,6 +412,20 @@ mod tests {
             .unwrap();
         let iso = time.as_time().and_then(|time| time.to_iso8601());
         assert_eq!(iso.as_deref(), Some("2009-07-14T05:01:14.0464405Z"));
+    }
+
+    #[test]
+    fn local_times_have_no_zone() {
+        let stored = Value::Binary(vec![0x00, 0x7d, 0xc2, 0xb0, 0x1d, 0x35, 0xd9, 0x01]);
+        let (time, _) = decoder(Layout::Sqlite)
+            .decode("System_ActivityHistory_LocalStartTime", &stored)
+            .unwrap();
+        let time = time.as_time().unwrap();
+        assert_eq!(time.semantic(), Semantic::LocalUnknownZone);
+        assert_eq!(
+            time.to_iso8601().as_deref(),
+            Some("2023-01-31T02:42:42.0000000")
+        );
     }
 
     #[test]

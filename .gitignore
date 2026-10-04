@@ -4,3 +4,5 @@
 /tests/fixtures-real/
 # Downloaded by tests/fetch-sidr.sh, never committed.
 /tests/fixtures/sidr/Windows.edb
+/tests/fixtures/sidr/Windows.db
+/tests/fixtures/sidr/*.json

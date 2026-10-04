@@ -104,7 +104,10 @@ impl Item {
 
     /// The well-known properties taken into fields, the rest left in
     /// [`Item::other`].
-    fn from_properties(work_id: Option<i64>, mut other: Vec<(String, Property)>) -> Self {
+    pub(crate) fn from_properties(
+        work_id: Option<i64>,
+        mut other: Vec<(String, Property)>,
+    ) -> Self {
         let mut text = |name| take(&mut other, name, |p| p.as_text().map(str::to_owned));
         let path = text("System_ItemPathDisplay");
         let folder = text("System_ItemFolderPathDisplay");

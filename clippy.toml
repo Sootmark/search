@@ -1,2 +1,2 @@
 # Domain vocabulary that is prose, not code.
-doc-valid-idents = ["WorkID", "DocID", "DocumentID", "ScopeID", "AutoSummary", "FILETIME", "FILETIMEs", ".."]
+doc-valid-idents = ["WorkID", "DocID", "DocumentID", "ScopeID", "AutoSummary", "FILETIME", "FILETIMEs", "SQLite", "WorkId", "ColumnId", "AppIdList", ".."]

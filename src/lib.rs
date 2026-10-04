@@ -12,6 +12,11 @@
 //! gatherer's tables, `SystemIndex_Gthr` and `SystemIndex_GthrPth`, list
 //! the items it found and the folders they are in.
 //!
+//! Windows 11 keeps the same properties in a SQLite database, `Windows.db`
+//! (read with `sootmark-sqlite`, with its write-ahead log when given one):
+//! one row per property of an item, the properties named in a table of
+//! their own; no gatherer tables.
+//!
 //! ```no_run
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let index = search::read(&std::fs::read("Windows.edb")?)?;
@@ -32,6 +37,7 @@ mod encoded;
 mod gather;
 mod item;
 mod property;
+mod windows_db;
 
 use std::collections::HashSet;
 
@@ -47,6 +53,8 @@ use property::{property_name, Decoder, Types};
 /// This crate's version, for records of what parsed them.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The first bytes of a SQLite database.
+const SQLITE_SIGNATURE: &[u8] = b"SQLite format 3\0";
 /// The properties one of which marks the property table.
 const ITEM_PROPERTIES: [&str; 2] = ["System_ItemPathDisplay", "System_ItemUrl"];
 
@@ -60,6 +68,18 @@ pub enum Layout {
     /// `SystemIndex_PropertyStore` (Windows 10): columns named with the
     /// property's number first; numbers little-endian.
     PropertyStore,
+    /// `Windows.db` (Windows 11): SQLite, a row per property of an item;
+    /// numbers little-endian.
+    Sqlite,
+}
+
+/// Which database a Windows Search index is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    /// `Windows.edb`: ESE (Windows Vista to 10).
+    Ese,
+    /// `Windows.db`: SQLite (Windows 11).
+    Sqlite,
 }
 
 /// A Windows Search index.
@@ -89,20 +109,40 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Whether a file named `name` (a path or a bare name) is a Windows Search
-/// index: `Windows.edb`, case ignored.
+/// Which index a file named `name` (a path or a bare name) is:
+/// `Windows.edb` or `Windows.db`, case ignored.
 #[must_use]
-pub fn detect(name: &str) -> bool {
+pub fn detect(name: &str) -> Option<Format> {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
-    base.eq_ignore_ascii_case("Windows.edb")
+    if base.eq_ignore_ascii_case("Windows.edb") {
+        Some(Format::Ese)
+    } else if base.eq_ignore_ascii_case("Windows.db") {
+        Some(Format::Sqlite)
+    } else {
+        None
+    }
 }
 
-/// Read a Windows Search index (`Windows.edb`).
+/// Read a Windows Search index, `Windows.edb` or `Windows.db` (told apart
+/// by their contents).
 ///
 /// # Errors
-/// When it isn't an ESE database, or has neither a property table nor the
-/// gatherer's.
+/// As [`read_with_log`].
 pub fn read(data: &[u8]) -> Result<Index, Error> {
+    read_with_log(data, &[])
+}
+
+/// Read a Windows Search index with, for `Windows.db`, its write-ahead log
+/// (the `-wal` file beside it; may be empty, and is ignored for
+/// `Windows.edb`).
+///
+/// # Errors
+/// When it is neither an ESE nor a SQLite database, or has neither a
+/// property table nor the gatherer's.
+pub fn read_with_log(data: &[u8], log: &[u8]) -> Result<Index, Error> {
+    if data.starts_with(SQLITE_SIGNATURE) {
+        return windows_db::read(data, log);
+    }
     let db = Database::open(data).map_err(|e| Error(e.to_string()))?;
     let mut problems = db.problems.clone();
     let table = db.tables.iter().find(|t| is_property_table(t));
@@ -184,14 +224,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detects_windows_edb() {
-        assert!(detect("Windows.edb"));
-        assert!(detect(
-            r"C:\ProgramData\Microsoft\Search\Data\Applications\Windows\windows.EDB"
-        ));
-        assert!(detect("evidence/Windows.edb"));
-        assert!(!detect("Windows.db"));
-        assert!(!detect("SRUDB.dat"));
-        assert!(!detect("MyWindows.edb"));
+    fn detects_both_indexes() {
+        assert_eq!(detect("Windows.edb"), Some(Format::Ese));
+        assert_eq!(
+            detect(r"C:\ProgramData\Microsoft\Search\Data\Applications\Windows\windows.EDB"),
+            Some(Format::Ese)
+        );
+        assert_eq!(detect("evidence/Windows.edb"), Some(Format::Ese));
+        assert_eq!(detect("Windows.db"), Some(Format::Sqlite));
+        assert_eq!(detect("SRUDB.dat"), None);
+        assert_eq!(detect("MyWindows.edb"), None);
     }
 }

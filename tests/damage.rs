@@ -16,11 +16,37 @@ fn used_pages(data: &[u8]) -> Vec<usize> {
         .collect()
 }
 
+/// SIDR's `Windows.db`, when `tests/fetch-sidr.sh` has downloaded it.
+fn windows_db() -> Option<Vec<u8>> {
+    std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sidr/Windows.db"
+    ))
+    .ok()
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(32))]
 
     #[test]
     fn arbitrary_bytes(data in proptest::collection::vec(any::<u8>(), 0..70_000)) {
+        let _ = search::read(&data);
+    }
+
+    #[test]
+    fn arbitrary_bytes_after_a_sqlite_header(data in proptest::collection::vec(any::<u8>(), 0..70_000)) {
+        let _ = search::read(&[b"SQLite format 3\0".as_slice(), &data].concat());
+    }
+
+    #[test]
+    fn windows_db_damaged(flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..200)) {
+        let Some(mut data) = windows_db() else {
+            return Ok(());
+        };
+        let len = data.len();
+        for (at, byte) in flips {
+            data[at % len] = byte;
+        }
         let _ = search::read(&data);
     }
 

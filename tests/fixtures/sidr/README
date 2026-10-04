@@ -1,2 +1,3 @@
 SIDR (https://github.com/strozfriedberg/sidr), Apache-2.0: tests/fetch-sidr.sh
-downloads its test Windows.edb here at a pinned commit; it is not committed.
+downloads its test Windows.edb and Windows.db here at a pinned commit, with
+SIDR's reports of Windows.db; none of them is committed.
